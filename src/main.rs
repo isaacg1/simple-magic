@@ -1,14 +1,25 @@
 mod game_data {
-    #[derive(Clone)]
+    #[derive(Clone, PartialEq, Eq)]
     pub enum Card {
         Land,
         Creature(CreatureCard),
     }
-    #[derive(Clone)]
+    #[derive(Clone, PartialEq, Eq)]
     pub struct CreatureCard {
         cmc: u64,
         pow: u64,
         tou: u64,
+    }
+    impl CreatureCard {
+        pub fn cmc(&self) -> u64 {
+            self.cmc
+        }
+        pub fn pow(&self) -> u64 {
+            self.pow
+        }
+        pub fn tou(&self) -> u64 {
+            self.tou
+        }
     }
     impl CreatureCard {
         pub fn try_new(cmc: u64, pow: u64, tou: u64) -> Result<Self, ()> {
@@ -57,15 +68,50 @@ mod game_data {
             }
         }
     }
+    pub struct Creature {
+        cmc: u64,
+        pow: u64,
+        tou: u64,
+        tapped: bool,
+    }
+    impl Creature {
+        pub fn new(creature_card: &CreatureCard) -> Self {
+            Creature {
+                cmc: creature_card.cmc,
+                pow: creature_card.pow,
+                tou: creature_card.tou,
+                tapped: false,
+            }
+        }
+    }
     // Either muligan or keep and return cards.
     pub enum MuliganChoice {
         Muligan,
         KeepExcept(Vec<usize>),
     }
+    // The information a player has available
+    pub struct PlayerView<'a> {
+        pub num_turn: u64,
+        pub hand: &'a Vec<Card>,
+        pub num_lands: u64,
+        pub creatures: &'a Vec<Creature>,
+        pub deck_size: usize,
+        pub oth_hand_size: usize,
+        pub oth_lands: u64,
+        pub oth_creatures: &'a Vec<Creature>,
+        pub oth_deck_size: usize,
+    }
+    // Response for main phase:
+    // whether to play a land,
+    // indexes in hand of creatures to play
+    pub struct MainPhasePlays {
+        pub land: bool,
+        pub cards: Vec<usize>,
+    }
 }
 
 mod player {
-    use crate::game_data::{Card, CreatureCard, MuliganChoice};
+    use crate::game_data::{Card, CreatureCard, MainPhasePlays, MuliganChoice, PlayerView};
     pub enum Player {
         LandsSuck,
         LandsRule,
@@ -92,9 +138,21 @@ mod player {
                 Player::LandsRule => MuliganChoice::KeepExcept(vec![]),
             }
         }
+        pub fn main_phase(&mut self, view: PlayerView) -> MainPhasePlays {
+            match self {
+                Player::LandsSuck => MainPhasePlays {
+                    land: false,
+                    cards: (0..view.hand.len()).collect(),
+                },
+                Player::LandsRule => MainPhasePlays {
+                    land: !view.hand.is_empty(),
+                    cards: vec![],
+                },
+            }
+        }
     }
 }
-use crate::game_data::{Card, MuliganChoice};
+use crate::game_data::{Card, Creature, MuliganChoice, PlayerView};
 use crate::player::Player;
 use rand::prelude::*;
 
@@ -102,7 +160,8 @@ struct PlayerState {
     player: Player,
     deck: Vec<Card>,
     hand: Vec<Card>,
-    // battlefields:
+    num_lands: u64,
+    creatures: Vec<Creature>,
 }
 #[derive(Debug, Eq, PartialEq)]
 enum DrawResult {
@@ -117,6 +176,8 @@ impl PlayerState {
             player,
             deck,
             hand: vec![],
+            num_lands: 0,
+            creatures: vec![],
         }
     }
     fn do_muligans(&mut self, is_first: bool) {
@@ -158,7 +219,30 @@ impl PlayerState {
             DrawResult::Nonempty
         }
     }
+    fn sort_hand(&mut self) {
+        self.hand
+            .sort_by_key(|card| if Card::Land == *card { 1 } else { 0 })
+    }
+    fn view_and_mut<'a>(
+        &'a mut self,
+        other_state: &'a Self,
+        num_turn: u64,
+    ) -> (PlayerView<'a>, &'a mut Player) {
+        let view = PlayerView {
+            num_turn,
+            hand: &self.hand,
+            num_lands: self.num_lands,
+            creatures: &self.creatures,
+            deck_size: self.deck.len(),
+            oth_hand_size: other_state.hand.len(),
+            oth_lands: other_state.num_lands,
+            oth_creatures: &other_state.creatures,
+            oth_deck_size: other_state.deck.len(),
+        };
+        (view, &mut self.player)
+    }
 }
+
 #[derive(Debug)]
 enum Winner {
     Player1,
@@ -181,7 +265,91 @@ impl GameState {
             let first = (i == 0) == player1_first;
             player_state.do_muligans(first);
         }
-        todo!()
+        let mut current_player = if player1_first { 0 } else { 1 };
+        let first_player = current_player;
+        let mut is_first_turn = true;
+        let mut num_turn = 1;
+        loop {
+            // Draw step
+            if !is_first_turn {
+                let draw_result = self.player_states[current_player].draw();
+                if let DrawResult::Empty = draw_result {
+                    // Game over due to decking
+                    return if current_player == 0 {
+                        Winner::Player2
+                    } else {
+                        Winner::Player1
+                    };
+                }
+            }
+            self.player_states[current_player].sort_hand();
+            // TODO: Current player attacks
+            // TODO: Other player blocks
+            // TODO: Current player orders blockers
+            // TODO: Check for dead creatures, lethal damage
+            // Main phase
+            let (current_state, other_state) = self.states_mut(current_player);
+            let (view, player) = current_state.view_and_mut(&other_state, num_turn);
+            let main_phase_plays = player.main_phase(view);
+            if main_phase_plays.land {
+                let land_position = current_state
+                    .hand
+                    .iter()
+                    .position(|c| c == &Card::Land)
+                    .expect("Player tried to play land, so land is present.");
+                current_state
+                    .hand
+                    .iter()
+                    .skip(land_position)
+                    .for_each(|c| match c {
+                        Card::Creature(_) => panic!("Creature after land"),
+                        Card::Land => (),
+                    });
+                current_state.hand.remove(land_position);
+                current_state.num_lands += 1;
+            }
+            let total_cmc: u64 = main_phase_plays
+                .cards
+                .iter()
+                .map(|i| {
+                    assert!(*i < current_state.hand.len());
+                    let card = &current_state.hand[*i];
+                    if let Card::Creature(creature_card) = card {
+                        creature_card.cmc()
+                    } else {
+                        panic!("Only cast creatures");
+                    }
+                })
+                .sum();
+            assert!(total_cmc <= current_state.num_lands);
+            main_phase_plays.cards.iter().for_each(|i| {
+                let card = &current_state.hand[*i];
+                if let Card::Creature(creature_card) = card {
+                    let creature = Creature::new(creature_card);
+                    current_state.creatures.push(creature);
+                } else {
+                    panic!("Only cast creatures");
+                }
+            });
+            main_phase_plays.cards.iter().for_each(|i| {
+                current_state.hand.remove(*i);
+            });
+
+            // TODO: Discard
+            todo!()
+        }
+    }
+    fn states_mut(&mut self, current_player: usize) -> (&mut PlayerState, &mut PlayerState) {
+        let (first_state, rest) = self
+            .player_states
+            .split_first_mut()
+            .expect("Multiple players");
+        let second_state = &mut rest[0];
+        if current_player == 0 {
+            (first_state, second_state)
+        } else {
+            (second_state, first_state)
+        }
     }
 }
 fn main() {
