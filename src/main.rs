@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 mod game_data {
-    #[derive(Clone, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Card {
         Land,
         Creature(CreatureCard),
     }
-    #[derive(Clone, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct CreatureCard {
         cmc: u64,
         pow: u64,
@@ -16,9 +16,11 @@ mod game_data {
         pub fn cmc(&self) -> u64 {
             self.cmc
         }
+        #[allow(dead_code)]
         pub fn pow(&self) -> u64 {
             self.pow
         }
+        #[allow(dead_code)]
         pub fn tou(&self) -> u64 {
             self.tou
         }
@@ -65,6 +67,8 @@ mod game_data {
             }
         }
     }
+    #[allow(dead_code)]
+    #[derive(Debug)]
     pub struct Creature {
         cmc: u64,
         pow: u64,
@@ -80,8 +84,19 @@ mod game_data {
                 tapped: false,
             }
         }
+        #[allow(dead_code)]
+        pub fn cmc(&self) -> u64 {
+            self.cmc
+        }
+        pub fn pow(&self) -> u64 {
+            self.pow
+        }
+        pub fn tou(&self) -> u64 {
+            self.tou
+        }
     }
     // Either muligan or keep and return cards.
+    #[allow(dead_code)]
     pub enum MuliganChoice {
         Muligan,
         KeepExcept(Vec<usize>),
@@ -109,10 +124,12 @@ mod game_data {
 
 mod player {
     use crate::game_data::{Card, CreatureCard, MainPhasePlays, MuliganChoice, PlayerView};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
+    #[derive(Debug)]
     pub enum Player {
         LandsSuck,
+        MemnitesDontBlock,
         LandsRule,
     }
     impl Player {
@@ -123,45 +140,97 @@ mod player {
                     let memnite = CreatureCard::try_new(0, 1, 1).expect("Memnite is allowed");
                     vec![Card::Creature(memnite); 60]
                 }
+                Player::MemnitesDontBlock => {
+                    let memnite = CreatureCard::try_new(0, 1, 1).expect("Memnite is allowed");
+                    vec![Card::Creature(memnite); 60]
+                }
                 Player::LandsRule => vec![Card::Land; 60],
             }
         }
         pub fn muligan_choice(
             &mut self,
-            hand: &Vec<Card>,
-            num_muls: usize,
-            is_first: bool,
+            _hand: &Vec<Card>,
+            _num_muls: usize,
+            _is_first: bool,
         ) -> MuliganChoice {
             match self {
-                Player::LandsSuck => MuliganChoice::KeepExcept(vec![]),
-                Player::LandsRule => MuliganChoice::KeepExcept(vec![]),
+                Player::LandsSuck | Player::MemnitesDontBlock | Player::LandsRule => {
+                    MuliganChoice::KeepExcept(vec![])
+                }
             }
         }
         pub fn attack(&mut self, view: PlayerView) -> Vec<usize> {
             match self {
-                Player::LandsSuck => (0..view.creatures.len()).collect(),
+                Player::LandsSuck | Player::MemnitesDontBlock => {
+                    (0..view.creatures.len()).collect()
+                }
                 Player::LandsRule => vec![],
             }
         }
         pub fn block(&mut self, view: PlayerView, attackers: &Vec<usize>) -> Vec<(usize, usize)> {
             match self {
-                Player::LandsSuck => todo!(),
-                Player::LandsRule => vec![],
+                Player::LandsSuck => {
+                    let mut blockers = vec![];
+                    let mut has_been_blocked = vec![];
+                    let mut num_matched = 0;
+                    let num_available = view.creatures.iter().filter(|c| !c.tapped).count() as u64;
+                    while num_matched < num_available {
+                        let best_block = view
+                            .oth_creatures
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, c)| {
+                                c.tapped
+                                    && c.tou() <= num_available - num_matched
+                                    && !has_been_blocked.contains(i)
+                            })
+                            .max_by_key(|(_, c)| c.tou());
+                        if let Some((best_block_index, best_block_creature)) = best_block {
+                            assert!(attackers.contains(&best_block_index));
+                            let num_block = best_block_creature.tou();
+                            for creature_number in num_matched..num_matched + num_block {
+                                let blocker_index = view
+                                    .creatures
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, c)| !c.tapped)
+                                    .nth(creature_number as usize)
+                                    .expect("Enough blockers available")
+                                    .0;
+                                blockers.push((blocker_index, best_block_index))
+                            }
+                            num_matched += num_block;
+                            has_been_blocked.push(best_block_index);
+                        } else {
+                            break;
+                        }
+                    }
+                    blockers
+                }
+                Player::MemnitesDontBlock | Player::LandsRule => vec![],
             }
         }
         pub fn order_blockers(
             &mut self,
             view: PlayerView,
-            default: &HashMap<usize, Vec<usize>>,
+            default_ordering: &HashMap<usize, Vec<usize>>,
         ) -> HashMap<usize, Vec<usize>> {
             match self {
-                Player::LandsSuck => todo!(),
-                Player::LandsRule => default.clone(),
+                Player::LandsSuck => {
+                    let mut ordering = HashMap::new();
+                    for (&attacker, blockers) in default_ordering {
+                        let mut blockers = blockers.clone();
+                        blockers.sort_by_key(|&b| view.oth_creatures[b].tou());
+                        ordering.insert(attacker, blockers);
+                    }
+                    ordering
+                }
+                Player::MemnitesDontBlock | Player::LandsRule => default_ordering.clone(),
             }
         }
         pub fn main_phase(&mut self, view: PlayerView) -> MainPhasePlays {
             match self {
-                Player::LandsSuck => MainPhasePlays {
+                Player::LandsSuck | Player::MemnitesDontBlock => MainPhasePlays {
                     land: false,
                     cards: (0..view.hand.len()).collect(),
                 },
@@ -174,7 +243,9 @@ mod player {
         pub fn discard(&mut self, view: PlayerView) -> Vec<usize> {
             assert!(view.hand.len() > 7);
             match self {
-                Player::LandsSuck | Player::LandsRule => (0..view.hand.len() - 7).collect(),
+                Player::LandsSuck | Player::LandsRule | Player::MemnitesDontBlock => {
+                    (0..view.hand.len() - 7).collect()
+                }
             }
         }
     }
@@ -183,12 +254,14 @@ use crate::game_data::{Card, Creature, MainPhasePlays, MuliganChoice, PlayerView
 use crate::player::Player;
 use rand::prelude::*;
 
+#[derive(Debug)]
 struct PlayerState {
     player: Player,
     deck: Vec<Card>,
     hand: Vec<Card>,
     num_lands: u64,
     creatures: Vec<Creature>,
+    life: i64,
 }
 #[derive(Debug, Eq, PartialEq)]
 enum DrawResult {
@@ -205,6 +278,7 @@ impl PlayerState {
             hand: vec![],
             num_lands: 0,
             creatures: vec![],
+            life: 20,
         }
     }
     fn do_muligans(&mut self, is_first: bool) {
@@ -300,10 +374,20 @@ impl PlayerState {
             index += 1;
             keep
         });
+        assert_eq!(self.hand.len(), 7, "Discard correct number of cards");
+    }
+    fn die(&mut self, dead_creatures: Vec<usize>) {
+        let prior_number_creatures = self.creatures.len();
+        let mut index = 0;
+        self.creatures.retain(|_| {
+            let keep = !dead_creatures.contains(&index);
+            index += 1;
+            keep
+        });
         assert_eq!(
-            self.hand.len(),
-            7,
-            "Discard correct number of cards"
+            prior_number_creatures,
+            self.creatures.len() + dead_creatures.len(),
+            "Correct number of creatures die"
         );
     }
     fn draw(&mut self) -> DrawResult {
@@ -318,6 +402,11 @@ impl PlayerState {
     fn sort_hand(&mut self) {
         self.hand
             .sort_by_key(|card| if Card::Land == *card { 1 } else { 0 })
+    }
+    fn untap(&mut self) {
+        for creature in &mut self.creatures {
+            creature.tapped = false
+        }
     }
     fn view_and_mut<'a>(
         &'a mut self,
@@ -337,6 +426,41 @@ impl PlayerState {
         };
         (view, &mut self.player)
     }
+    fn print_player(&self, is_current_player: bool) {
+        print!(
+            "L: {}, C: {}, P: {:?}",
+            self.life,
+            self.deck.len(),
+            self.player
+        );
+        if is_current_player {
+            print!("   <<<");
+        }
+        println!();
+    }
+    fn print_hand(&self) {
+        print!("H: ");
+        for card in &self.hand {
+            match card {
+                Card::Creature(cc) => print!("{}/{}/{} ", cc.cmc(), cc.pow(), cc.tou()),
+                Card::Land => print!("Land "),
+            }
+        }
+        println!();
+    }
+    fn print_battlefield(&self) {
+        print!("B: {} lands    ", self.num_lands);
+        for creature in &self.creatures {
+            print!(
+                "{}/{}/{}{} ",
+                creature.cmc(),
+                creature.pow(),
+                creature.tou(),
+                if creature.tapped { "t" } else { "u" }
+            )
+        }
+        println!();
+    }
 }
 
 #[derive(Debug)]
@@ -344,34 +468,57 @@ enum Winner {
     Player1,
     Player2,
 }
+#[allow(dead_code)]
+#[derive(Debug, Copy, Clone)]
+enum Printout {
+    PrintAndPause,
+    Print,
+    Nothing,
+}
+#[derive(Debug)]
 struct GameState {
     player_states: [PlayerState; 2],
+    num_turn: u64,
+    current_player_index: usize,
+    printout: Printout,
 }
 impl GameState {
-    // TODO: Add a printout flag
-    fn new(player1: Player, player2: Player) -> Self {
+    #[allow(dead_code)]
+    fn new_with_flip(player1: Player, player2: Player, printout: Printout) -> Self {
+        let mut rng = thread_rng();
+        let player1_first = rng.gen::<f64>() < 0.5;
+        if player1_first {
+            GameState::new(player1, player2, printout)
+        } else {
+            GameState::new(player2, player1, printout)
+        }
+    }
+    fn new(player1: Player, player2: Player, printout: Printout) -> Self {
         GameState {
             player_states: [PlayerState::new(player1), PlayerState::new(player2)],
+            num_turn: 1,
+            current_player_index: 0,
+            printout,
         }
     }
     fn play(&mut self) -> Winner {
-        let mut rng = thread_rng();
-        let player1_first = rng.gen::<f64>() < 0.5;
         for (i, player_state) in self.player_states.iter_mut().enumerate() {
-            let first = (i == 0) == player1_first;
-            player_state.do_muligans(first);
+            player_state.do_muligans(i == 0);
         }
-        let mut current_player_index = if player1_first { 0 } else { 1 };
-        let first_player_index = current_player_index;
-        let mut is_first_turn = true;
-        let mut num_turn = 1;
         loop {
-            // TODO: Untap
-            todo!();
+            let num_turn = self.num_turn;
+            let current_player_index = self.current_player_index;
+            // Untap
+            let (current_state, _) = self.states_mut(current_player_index);
+            current_state.untap();
+            if !(num_turn == 1 && current_player_index == 0) {
+                self.handle_printout("Untap");
+            }
             // Draw step
-            if !is_first_turn {
+            if !(num_turn == 1 && current_player_index == 0) {
                 let draw_result = self.player_states[current_player_index].draw();
                 if let DrawResult::Empty = draw_result {
+                    self.handle_printout("Game over due to decking");
                     // Game over due to decking
                     return if current_player_index == 0 {
                         Winner::Player2
@@ -381,7 +528,8 @@ impl GameState {
                 }
             }
             self.player_states[current_player_index].sort_hand();
-            // TODO: Current player attacks
+            self.handle_printout("Draw");
+            // Current player attacks
             let (current_state, other_state) = self.states_mut(current_player_index);
             let (current_view, current_player) = current_state.view_and_mut(&other_state, num_turn);
             let attackers = current_player.attack(current_view);
@@ -393,7 +541,11 @@ impl GameState {
                 );
                 current_state.creatures[attacker].tapped = true;
             }
-            // TODO: Other player blocks
+            if !attackers.is_empty() {
+                self.handle_printout("Attack");
+            }
+            // Other player blocks
+            let (current_state, other_state) = self.states_mut(current_player_index);
             let (other_view, other_player) = other_state.view_and_mut(&current_state, num_turn);
             let blocking_pairs = other_player.block(other_view, &attackers);
             let mut blockers = HashSet::new();
@@ -401,6 +553,10 @@ impl GameState {
             for (blocker, attacker) in blocking_pairs {
                 assert!(attacker < current_state.creatures.len());
                 assert!(blocker < other_state.creatures.len());
+                assert!(
+                    !other_state.creatures[blocker].tapped,
+                    "Tapped creatures can't block"
+                );
                 assert!(!blockers.contains(&blocker), "Creatures can't block twice");
                 blockers.insert(blocker);
                 blocking_arrangement
@@ -408,28 +564,97 @@ impl GameState {
                     .or_insert(vec![])
                     .push(blocker);
             }
-            // TODO: Current player orders blockers
+            // Current player orders blockers
             let (current_view, current_player) = current_state.view_and_mut(&other_state, num_turn);
             let ordered_blockers =
                 current_player.order_blockers(current_view, &blocking_arrangement);
-            // TODO: Check for dead creatures, lethal damage
-            todo!();
+            assert_eq!(
+                blocking_arrangement.len(),
+                ordered_blockers.len(),
+                "Same number of attackers"
+            );
+            for (attacker, blockers) in &ordered_blockers {
+                assert!(blocking_arrangement.contains_key(attacker));
+                let default_blockers = &blocking_arrangement[attacker];
+                assert_eq!(
+                    blockers.len(),
+                    default_blockers.len(),
+                    "Same number of blockers"
+                );
+                blockers
+                    .iter()
+                    .for_each(|i| assert!(default_blockers.contains(i)));
+                default_blockers
+                    .iter()
+                    .for_each(|i| assert!(blockers.contains(i)));
+            }
+            let mut all_blockers = ordered_blockers;
+            // Add in unblocked attackers
+            for &attacker in &attackers {
+                all_blockers.entry(attacker).or_insert(vec![]);
+            }
+            // Damage, check for dead creatures, lethal damage
+            let mut dead_attackers = vec![];
+            let mut dead_blockers = vec![];
+            for (&attacker, blockers) in &all_blockers {
+                let attacker_pow = current_state.creatures[attacker].pow();
+                if blockers.is_empty() {
+                    other_state.life -= attacker_pow as i64
+                } else {
+                    let mut attacker_damage_remaining = attacker_pow;
+                    for &blocker in blockers {
+                        let blocker_tou = other_state.creatures[blocker].tou();
+                        if blocker_tou > attacker_damage_remaining {
+                            break;
+                        } else {
+                            attacker_damage_remaining -= blocker_tou;
+                            dead_blockers.push(blocker)
+                        }
+                    }
+                    let blocker_damage_total: u64 = blockers
+                        .iter()
+                        .map(|&b| other_state.creatures[b].pow())
+                        .sum();
+                    let attacker_tou = current_state.creatures[attacker].tou();
+                    if blocker_damage_total >= attacker_tou {
+                        dead_attackers.push(attacker)
+                    }
+                }
+            }
+            current_state.die(dead_attackers);
+            other_state.die(dead_blockers);
+
+            if other_state.life <= 0 {
+                self.handle_printout("Game over due to life");
+                // Game over due to life loss
+                return if current_player_index == 0 {
+                    Winner::Player1
+                } else {
+                    Winner::Player2
+                };
+            }
+            if !attackers.is_empty() {
+                self.handle_printout("Damage");
+            }
             // Main phase
             let (current_state, other_state) = self.states_mut(current_player_index);
             let (view, player) = current_state.view_and_mut(&other_state, num_turn);
             let main_phase_plays = player.main_phase(view);
             current_state.handle_main_phase_plays(main_phase_plays);
+            self.handle_printout("Main phase");
 
             // Discard
+            let (current_state, other_state) = self.states_mut(current_player_index);
             if current_state.hand.len() > 7 {
                 let (view, player) = current_state.view_and_mut(&other_state, num_turn);
                 let discard_indices = player.discard(view);
                 current_state.handle_discard(discard_indices);
+                self.handle_printout("Discard");
             }
             // Switch current player, increment turn number as appropriate
-            current_player_index = 1 - current_player_index;
-            if current_player_index == first_player_index {
-                num_turn += 1;
+            self.current_player_index = 1 - self.current_player_index;
+            if self.current_player_index == 0 {
+                self.num_turn += 1;
             }
         }
     }
@@ -445,9 +670,62 @@ impl GameState {
             (second_state, first_state)
         }
     }
+    fn handle_printout(&self, phase: &str) {
+        if let Printout::Nothing = self.printout {
+            return;
+        }
+        println!("{} {}", phase, self.num_turn);
+        let state0 = &self.player_states[0];
+        let state1 = &self.player_states[1];
+        state0.print_player(self.current_player_index == 0);
+        state0.print_hand();
+        state0.print_battlefield();
+        state1.print_battlefield();
+        state1.print_hand();
+        state1.print_player(self.current_player_index == 1);
+
+        if let Printout::PrintAndPause = self.printout {
+            use std::io::{stdin, stdout, Write};
+            let mut s = String::new();
+            println!("Enter to continue");
+            stdout().flush().expect("Flushed");
+            stdin().read_line(&mut s).expect("Continued");
+        }
+    }
 }
 fn main() {
-    let mut game = GameState::new(Player::LandsSuck, Player::LandsRule);
-    let winner = game.play();
-    println!("{:?}", winner);
+    for (player1, player2) in vec![
+        (Player::LandsRule, Player::LandsRule),
+        (Player::LandsRule, Player::LandsSuck),
+        (Player::LandsSuck, Player::LandsSuck),
+        (Player::LandsSuck, Player::MemnitesDontBlock),
+        (Player::MemnitesDontBlock, Player::LandsSuck),
+        (Player::MemnitesDontBlock, Player::MemnitesDontBlock),
+    ] {
+        let mut game = GameState::new(player1, player2, Printout::Nothing);
+        let winner = game.play();
+        let player1 = &game.player_states[0].player;
+        let player2 = &game.player_states[1].player;
+        println!(
+            "{:?} v {:?}: {:?} ({}) wins",
+            player1, player2,
+            match winner {
+                Winner::Player1 => player1,
+                Winner::Player2 => player2,
+            },
+            match winner {
+                Winner::Player1 => 0,
+                Winner::Player2 => 1,
+            }
+        );
+        println!(
+            "On turn {} of {:?} ({}), life {} v {}",
+            game.num_turn,
+            game.player_states[game.current_player_index].player,
+            game.current_player_index,
+            game.player_states[0].life,
+            game.player_states[1].life
+        );
+        println!()
+    }
 }
